@@ -1,0 +1,27 @@
+[package]
+name = "mikorin_backend"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+argon2 = "0.4"
+axum = { version = "0.5", features = ["headers"] }
+axum-server = { version = "0.4.0", features = ["tls-rustls"] }
+chrono = { version = "0.4", features = ["serde"] }
+dotenv = "0.15"
+headers = "0.3"
+hex = "0.4"
+lazy_static = "1.4"
+rand = "0.8"
+regex = "1.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+sqlx = { version = "0.5", features = [
+    "chrono",
+    "macros",
+    "postgres",
+    "runtime-tokio-rustls",
+] }
+tokio = { version = "1.0", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
