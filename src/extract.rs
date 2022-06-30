@@ -31,9 +31,11 @@ where
 
 async fn get_user_id(pool: &Pool<Postgres>, token: &str) -> Result<i64, sqlx::Error> {
     Ok(sqlx::query!(
-        "SELECT user_id
-         FROM UserTokens
-         WHERE token = $1 AND expires > now()",
+        "
+        SELECT user_id
+        FROM UserTokens
+        WHERE token = $1 AND expires > now()
+        ",
         token
     )
     .fetch_one(pool)
@@ -47,9 +49,11 @@ async fn get_user_permissions(
 ) -> Result<HashSet<String>, sqlx::Error> {
     Ok(HashSet::from_iter(
         sqlx::query!(
-            "SELECT permission_name
-             FROM UserGroups INNER JOIN GroupPermissions ON UserGroups.group_id = GroupPermissions.group_id
-             WHERE UserGroups.user_id = $1",
+            "
+            SELECT permission_name
+            FROM UserGroups INNER JOIN GroupPermissions ON UserGroups.group_id = GroupPermissions.group_id
+            WHERE UserGroups.user_id = $1
+            ",
             user_id
         )
         .fetch_all(pool)
@@ -60,7 +64,7 @@ async fn get_user_permissions(
 }
 
 #[derive(Debug)]
-pub struct Authenticated(pub i64, pub String);
+pub struct Authenticated(pub i64);
 
 #[async_trait]
 impl<B> FromRequest<B> for Authenticated
@@ -89,12 +93,12 @@ where
                 }
             })?;
 
-        Ok(Self(user_id, bearer.token().to_string()))
+        Ok(Self(user_id))
     }
 }
 
 #[derive(Debug)]
-pub struct Authorized(pub i64, pub String, pub HashSet<String>);
+pub struct Authorized(pub i64, pub HashSet<String>);
 
 #[async_trait]
 impl<B> FromRequest<B> for Authorized
@@ -128,6 +132,6 @@ where
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         })?;
 
-        Ok(Self(user_id, bearer.token().to_string(), permissions))
+        Ok(Self(user_id, permissions))
     }
 }

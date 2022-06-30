@@ -6,8 +6,9 @@ use axum::{
     extract::{OriginalUri, Path},
     http::{header, StatusCode},
     routing::get,
-    Extension, Json, Router,
+    Extension, Json, Router, TypedHeader,
 };
+use headers::{authorization::Bearer, Authorization};
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -35,10 +36,16 @@ enum ListUsersError {
 }
 
 async fn list_users(pool: &Pool<Postgres>) -> Result<Vec<User>, ListUsersError> {
-    sqlx::query_as!(User, "SELECT id, name FROM Users")
-        .fetch_all(pool)
-        .await
-        .map_err(ListUsersError::Database)
+    sqlx::query_as!(
+        User,
+        "
+        SELECT id, name
+        FROM Users
+        "
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(ListUsersError::Database)
 }
 
 #[derive(Debug, Deserialize)]
@@ -68,7 +75,12 @@ async fn create_user(pool: &Pool<Postgres>, dto: CreateUserDto) -> Result<User, 
 
     Ok(sqlx::query_as!(
         User,
-        "INSERT INTO Users (username, password, name) VALUES ($1, $2, $3) RETURNING id, name",
+        "
+        INSERT INTO
+            Users (username, password, name)
+            VALUES ($1, $2, $3)
+        RETURNING id, name
+        ",
         dto.username,
         hash.to_string(),
         dto.name
@@ -88,13 +100,20 @@ enum ShowUserError {
 }
 
 async fn show_user(pool: &Pool<Postgres>, id: i64) -> Result<User, ShowUserError> {
-    sqlx::query_as!(User, "SELECT id, name FROM Users WHERE id = $1", id)
-        .fetch_one(pool)
-        .await
-        .map_err(|err| match err {
-            sqlx::Error::RowNotFound => ShowUserError::NotFound,
-            _ => ShowUserError::Database(err),
-        })
+    sqlx::query_as!(
+        User,
+        "
+        SELECT id, name
+        FROM Users WHERE id = $1
+        ",
+        id
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|err| match err {
+        sqlx::Error::RowNotFound => ShowUserError::NotFound,
+        _ => ShowUserError::Database(err),
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,10 +183,16 @@ async fn update_user(
 
         // If username or password were successfully changed, also revoke all tokens.
         if dto.username.is_some() || dto.password.is_some() {
-            sqlx::query!("DELETE FROM UserTokens WHERE user_id = $1", id)
-                .execute(pool)
-                .await
-                .map_err(UpdateUserError::Database)?;
+            sqlx::query!(
+                "
+                DELETE FROM UserTokens
+                WHERE user_id = $1
+                ",
+                id
+            )
+            .execute(pool)
+            .await
+            .map_err(UpdateUserError::Database)?;
         }
     }
 
@@ -181,7 +206,13 @@ enum DeleteUserError {
 
 async fn delete_user(pool: &Pool<Postgres>, id: i64) -> Result<(), DeleteUserError> {
     sqlx::query!(
-        "UPDATE Users SET username = NULL, password = NULL, name = NULL WHERE id = $1",
+        "
+        UPDATE Users SET
+            username = NULL,
+            password = NULL,
+            name = NULL
+        WHERE id = $1
+        ",
         id
     )
     .execute(pool)
@@ -189,12 +220,45 @@ async fn delete_user(pool: &Pool<Postgres>, id: i64) -> Result<(), DeleteUserErr
     .map_err(DeleteUserError::Database)?;
 
     // Revoke all tokens.
-    sqlx::query!("DELETE FROM UserTokens WHERE user_id = $1", id)
-        .execute(pool)
-        .await
-        .map_err(DeleteUserError::Database)?;
+    sqlx::query!(
+        "
+        DELETE FROM UserTokens
+        WHERE user_id = $1
+        ",
+        id
+    )
+    .execute(pool)
+    .await
+    .map_err(DeleteUserError::Database)?;
 
     Ok(())
+}
+
+#[derive(Debug)]
+enum ShowCurrentUserError {
+    NoCurrentUser,
+    Database(sqlx::Error),
+}
+
+async fn show_current_user(
+    pool: &Pool<Postgres>,
+    token: &str,
+) -> Result<User, ShowCurrentUserError> {
+    sqlx::query_as!(
+        User,
+        "
+        SELECT Users.id, Users.name
+        FROM Users JOIN UserTokens ON Users.id = UserTokens.user_id
+        WHERE UserTokens.token = $1 AND expires > now()
+        ",
+        token
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|err| match err {
+        sqlx::Error::RowNotFound => ShowCurrentUserError::NoCurrentUser,
+        _ => ShowCurrentUserError::Database(err),
+    })
 }
 
 pub fn controllers() -> Router {
@@ -254,7 +318,7 @@ pub fn controllers() -> Router {
                 async move |Extension(pool): Extension<Pool<Postgres>>,
                             Path(id): Path<i64>,
                             Json(dto): Json<UpdateUserDto>,
-                            Authenticated(user_id, _): Authenticated|
+                            Authenticated(user_id): Authenticated|
                             -> UpdateResult {
                     if user_id != id {
                         return Err(StatusCode::FORBIDDEN);
@@ -275,7 +339,7 @@ pub fn controllers() -> Router {
             .delete(
                 async move |Extension(pool): Extension<Pool<Postgres>>,
                             Path(id): Path<i64>,
-                            Authenticated(user_id, _): Authenticated|
+                            Authenticated(user_id): Authenticated|
                             -> DeleteResult {
                     if user_id != id {
                         return Err(StatusCode::FORBIDDEN);
@@ -289,6 +353,28 @@ pub fn controllers() -> Router {
                     })?;
 
                     Ok(StatusCode::NO_CONTENT)
+                },
+            ),
+        )
+        .route(
+            "/current",
+            get(
+                async move |Extension(pool): Extension<Pool<Postgres>>,
+                            TypedHeader(Authorization(bearer)): TypedHeader<
+                    Authorization<Bearer>,
+                >|
+                            -> ShowResult<User> {
+                    let user = show_current_user(&pool, bearer.token())
+                        .await
+                        .map_err(|err| match err {
+                            ShowCurrentUserError::NoCurrentUser => StatusCode::NOT_FOUND,
+                            ShowCurrentUserError::Database(_) => {
+                                tracing::error!("{:?}", err);
+                                StatusCode::INTERNAL_SERVER_ERROR
+                            }
+                        })?;
+
+                    Ok(Json(user))
                 },
             ),
         )

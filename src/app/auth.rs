@@ -2,15 +2,13 @@ use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use axum::{
     http::{header, StatusCode},
     routing::post,
-    Extension, Json, Router,
+    Extension, Json, Router, TypedHeader,
 };
 use chrono::{DateTime, Duration, Utc};
-use headers::HeaderName;
+use headers::{authorization::Bearer, Authorization, HeaderName};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sqlx::{Pool, Postgres};
-
-use crate::extract::Authenticated;
 
 #[derive(Debug, Serialize)]
 struct Token {
@@ -27,8 +25,8 @@ struct SignInDto {
 
 #[derive(Debug)]
 enum SignInError {
+    DeletedUser,
     InvalidCredentials,
-    InvalidUser,
     NotFound,
     Database(sqlx::Error),
     Hashing(argon2::password_hash::Error),
@@ -37,7 +35,11 @@ enum SignInError {
 async fn sign_in(pool: &Pool<Postgres>, dto: SignInDto) -> Result<Token, SignInError> {
     // Retrieve auth information.
     let auth = sqlx::query!(
-        "SELECT id, password FROM Users WHERE username = $1",
+        "
+        SELECT id, password
+        FROM Users
+        WHERE username = $1
+        ",
         dto.username
     )
     .fetch_one(pool)
@@ -62,7 +64,11 @@ async fn sign_in(pool: &Pool<Postgres>, dto: SignInDto) -> Result<Token, SignInE
 
         // Push token to database.
         sqlx::query!(
-            "INSERT INTO UserTokens (token, user_id, expires) VALUES ($1, $2, $3)",
+            "
+            INSERT INTO
+                UserTokens (token, user_id, expires)
+                VALUES ($1, $2, $3)
+            ",
             token,
             auth.id,
             expires
@@ -77,7 +83,7 @@ async fn sign_in(pool: &Pool<Postgres>, dto: SignInDto) -> Result<Token, SignInE
             expires,
         })
     } else {
-        Err(SignInError::InvalidUser)
+        Err(SignInError::DeletedUser)
     }
 }
 
@@ -87,10 +93,16 @@ enum SignOutError {
 }
 
 async fn sign_out(pool: &Pool<Postgres>, token: &str) -> Result<(), SignOutError> {
-    sqlx::query!("DELETE FROM UserTokens WHERE token = $1", token)
-        .execute(pool)
-        .await
-        .map_err(SignOutError::Database)?;
+    sqlx::query!(
+        "
+        DELETE FROM UserTokens
+        WHERE token = $1
+        ",
+        token
+    )
+    .execute(pool)
+    .await
+    .map_err(SignOutError::Database)?;
 
     Ok(())
 }
@@ -108,7 +120,7 @@ pub fn controllers() -> Router {
                             -> SignInResult {
                     let token = sign_in(&pool, dto).await.map_err(|err| match err {
                         SignInError::InvalidCredentials
-                        | SignInError::InvalidUser
+                        | SignInError::DeletedUser
                         | SignInError::NotFound => StatusCode::FORBIDDEN,
                         SignInError::Database(_) | SignInError::Hashing(_) => {
                             tracing::error!("{:?}", err);
@@ -124,14 +136,18 @@ pub fn controllers() -> Router {
             "/sign-out",
             post(
                 async move |Extension(pool): Extension<Pool<Postgres>>,
-                            Authenticated(_, token): Authenticated|
+                            TypedHeader(Authorization(bearer)): TypedHeader<
+                    Authorization<Bearer>,
+                >|
                             -> SignOutResult {
-                    sign_out(&pool, &token).await.map_err(|err| match err {
-                        SignOutError::Database(_) => {
-                            tracing::error!("{:?}", err);
-                            StatusCode::INTERNAL_SERVER_ERROR
-                        }
-                    })?;
+                    sign_out(&pool, &bearer.token())
+                        .await
+                        .map_err(|err| match err {
+                            SignOutError::Database(_) => {
+                                tracing::error!("{:?}", err);
+                                StatusCode::INTERNAL_SERVER_ERROR
+                            }
+                        })?;
 
                     Ok(())
                 },
