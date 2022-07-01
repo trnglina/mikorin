@@ -1,33 +1,55 @@
+use std::cmp::min;
+
 use argon2::{
     password_hash::{rand_core, SaltString},
     Argon2, PasswordHasher,
 };
 use axum::{
-    extract::{OriginalUri, Path},
+    extract::{OriginalUri, Path, Query},
     http::{header, StatusCode},
     routing::get,
-    Extension, Json, Router, TypedHeader,
+    Extension, Json, Router,
 };
-use headers::{authorization::Bearer, Authorization};
 use lazy_static::lazy_static;
 use regex::Regex;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sqlx::{Pool, Postgres, QueryBuilder};
 
 use crate::{
+    config,
     extract::Authenticated,
+    model::{Group, User},
     result::{CreateResult, DeleteResult, ListResult, ShowResult, UpdateResult},
     serde::deserialize_some,
 };
 
 lazy_static! {
     static ref USERNAME_REGEX: Regex = Regex::new("^[a-zA-Z0-9_\\-]{4,64}$").unwrap();
+    static ref PASSWORD_REGEX: Regex = Regex::new("^.{8,512}$").unwrap();
 }
 
-#[derive(Debug, Serialize)]
-struct User {
-    id: i64,
-    name: Option<String>,
+async fn get_groups(pool: &Pool<Postgres>, group_ids: Vec<i64>) -> Result<Vec<Group>, sqlx::Error> {
+    sqlx::query_as!(
+        Group,
+        r#"
+        SELECT
+            Groups.id,
+            Groups.name,
+            ARRAY_AGG(GroupPermissions.permission_name) as "permissions!: Vec<String>"
+        FROM Groups JOIN GroupPermissions ON Groups.id = GroupPermissions.group_id
+        WHERE Groups.id = ANY($1)
+        GROUP BY Groups.id
+        "#,
+        &group_ids[..]
+    )
+    .fetch_all(pool)
+    .await
+}
+
+#[derive(Debug, Deserialize)]
+struct ListUsersQuery {
+    offset: Option<i64>,
+    limit: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -35,17 +57,50 @@ enum ListUsersError {
     Database(sqlx::Error),
 }
 
-async fn list_users(pool: &Pool<Postgres>) -> Result<Vec<User>, ListUsersError> {
-    sqlx::query_as!(
-        User,
-        "
-        SELECT id, name
-        FROM Users
-        "
+async fn list_users(
+    pool: &Pool<Postgres>,
+    offset: i64,
+    limit: i64,
+) -> Result<Vec<User>, ListUsersError> {
+    let limit = min(limit, config::PAGINATION_MAX_LIMIT);
+
+    let records = sqlx::query!(
+        r#"
+        SELECT
+            Users.id,
+            Users.name,
+            ARRAY_REMOVE(ARRAY_AGG(UserGroups.group_id), NULL) as "groups: Vec<i64>"
+        FROM Users LEFT OUTER JOIN UserGroups ON Users.id = UserGroups.user_id
+        GROUP BY Users.id
+        ORDER BY Users.id
+        OFFSET $1
+        LIMIT $2
+        "#,
+        offset,
+        limit
     )
     .fetch_all(pool)
     .await
-    .map_err(ListUsersError::Database)
+    .map_err(ListUsersError::Database)?;
+
+    let mut users: Vec<User> = Vec::new();
+    for record in records {
+        let groups = if let Some(group_ids) = record.groups {
+            get_groups(pool, group_ids)
+                .await
+                .map_err(ListUsersError::Database)?
+        } else {
+            Vec::new()
+        };
+
+        users.push(User {
+            id: record.id,
+            name: record.name,
+            groups,
+        })
+    }
+
+    Ok(users)
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,7 +119,7 @@ enum CreateUserError {
 }
 
 async fn create_user(pool: &Pool<Postgres>, dto: CreateUserDto) -> Result<User, CreateUserError> {
-    if !USERNAME_REGEX.is_match(&dto.username) || !(8..=512).contains(&dto.password.len()) {
+    if !USERNAME_REGEX.is_match(&dto.username) || !PASSWORD_REGEX.is_match(&dto.password) {
         return Err(CreateUserError::CredentialValidation);
     }
 
@@ -73,8 +128,7 @@ async fn create_user(pool: &Pool<Postgres>, dto: CreateUserDto) -> Result<User, 
         .hash_password(dto.password.as_bytes(), &salt)
         .map_err(CreateUserError::Hashing)?;
 
-    Ok(sqlx::query_as!(
-        User,
+    let record = sqlx::query!(
         "
         INSERT INTO
             Users (username, password, name)
@@ -90,7 +144,13 @@ async fn create_user(pool: &Pool<Postgres>, dto: CreateUserDto) -> Result<User, 
     .map_err(|err| match err {
         sqlx::Error::Database(db) if "23505" == db.code().unwrap() => CreateUserError::Conflict,
         _ => CreateUserError::Database(err),
-    })?)
+    })?;
+
+    Ok(User {
+        id: record.id,
+        name: record.name,
+        groups: Vec::new(),
+    })
 }
 
 #[derive(Debug)]
@@ -100,12 +160,16 @@ enum ShowUserError {
 }
 
 async fn show_user(pool: &Pool<Postgres>, id: i64) -> Result<User, ShowUserError> {
-    sqlx::query_as!(
-        User,
-        "
-        SELECT id, name
-        FROM Users WHERE id = $1
-        ",
+    let record = sqlx::query!(
+        r#"
+        SELECT
+            id,
+            name,
+            ARRAY_REMOVE(ARRAY_AGG(UserGroups.group_id), NULL) as "groups: Vec<i64>"
+        FROM Users LEFT OUTER JOIN UserGroups ON Users.id = UserGroups.user_id
+        WHERE id = $1
+        GROUP BY Users.id
+        "#,
         id
     )
     .fetch_one(pool)
@@ -113,6 +177,20 @@ async fn show_user(pool: &Pool<Postgres>, id: i64) -> Result<User, ShowUserError
     .map_err(|err| match err {
         sqlx::Error::RowNotFound => ShowUserError::NotFound,
         _ => ShowUserError::Database(err),
+    })?;
+
+    let groups = if let Some(group_ids) = record.groups {
+        get_groups(pool, group_ids)
+            .await
+            .map_err(ShowUserError::Database)?
+    } else {
+        Vec::new()
+    };
+
+    Ok(User {
+        id: record.id,
+        name: record.name,
+        groups,
     })
 }
 
@@ -149,7 +227,7 @@ async fn update_user(
         // Validate password and hash if set.
         let salt = SaltString::generate(&mut rand_core::OsRng);
         let hash = match &dto.password {
-            Some(pword) if (8..=512).contains(&pword.len()) => Some(
+            Some(pword) if PASSWORD_REGEX.is_match(pword) => Some(
                 Argon2::default()
                     .hash_password(pword.as_bytes(), &salt)
                     .map_err(UpdateUserError::Hashing)?,
@@ -185,7 +263,7 @@ async fn update_user(
         if dto.username.is_some() || dto.password.is_some() {
             sqlx::query!(
                 "
-                DELETE FROM UserTokens
+                DELETE FROM Tokens
                 WHERE user_id = $1
                 ",
                 id
@@ -222,7 +300,7 @@ async fn delete_user(pool: &Pool<Postgres>, id: i64) -> Result<(), DeleteUserErr
     // Revoke all tokens.
     sqlx::query!(
         "
-        DELETE FROM UserTokens
+        DELETE FROM Tokens
         WHERE user_id = $1
         ",
         id
@@ -234,40 +312,21 @@ async fn delete_user(pool: &Pool<Postgres>, id: i64) -> Result<(), DeleteUserErr
     Ok(())
 }
 
-#[derive(Debug)]
-enum ShowCurrentUserError {
-    NoCurrentUser,
-    Database(sqlx::Error),
-}
-
-async fn show_current_user(
-    pool: &Pool<Postgres>,
-    token: &str,
-) -> Result<User, ShowCurrentUserError> {
-    sqlx::query_as!(
-        User,
-        "
-        SELECT Users.id, Users.name
-        FROM Users JOIN UserTokens ON Users.id = UserTokens.user_id
-        WHERE UserTokens.token = $1 AND expires > now()
-        ",
-        token
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(|err| match err {
-        sqlx::Error::RowNotFound => ShowCurrentUserError::NoCurrentUser,
-        _ => ShowCurrentUserError::Database(err),
-    })
-}
-
 pub fn controllers() -> Router {
     Router::new()
         .route(
             "/",
             get(
-                async move |Extension(pool): Extension<Pool<Postgres>>| -> ListResult<User> {
-                    let users = list_users(&pool).await.map_err(|err| {
+                async move |Extension(pool): Extension<Pool<Postgres>>,
+                            Query(query): Query<ListUsersQuery>|
+                            -> ListResult<User> {
+                    let users = list_users(
+                        &pool,
+                        query.offset.unwrap_or(0),
+                        query.limit.unwrap_or(config::PAGINATION_MAX_LIMIT),
+                    )
+                    .await
+                    .map_err(|err| {
                         tracing::error!("{:?}", err);
                         StatusCode::INTERNAL_SERVER_ERROR
                     })?;
@@ -353,28 +412,6 @@ pub fn controllers() -> Router {
                     })?;
 
                     Ok(StatusCode::NO_CONTENT)
-                },
-            ),
-        )
-        .route(
-            "/current",
-            get(
-                async move |Extension(pool): Extension<Pool<Postgres>>,
-                            TypedHeader(Authorization(bearer)): TypedHeader<
-                    Authorization<Bearer>,
-                >|
-                            -> ShowResult<User> {
-                    let user = show_current_user(&pool, bearer.token())
-                        .await
-                        .map_err(|err| match err {
-                            ShowCurrentUserError::NoCurrentUser => StatusCode::NOT_FOUND,
-                            ShowCurrentUserError::Database(_) => {
-                                tracing::error!("{:?}", err);
-                                StatusCode::INTERNAL_SERVER_ERROR
-                            }
-                        })?;
-
-                    Ok(Json(user))
                 },
             ),
         )

@@ -4,27 +4,22 @@ use axum::{
     routing::post,
     Extension, Json, Router, TypedHeader,
 };
-use chrono::{DateTime, Duration, Utc};
+use chrono::{Duration, Utc};
 use headers::{authorization::Bearer, Authorization, HeaderName};
 use rand::Rng;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sqlx::{Pool, Postgres};
 
-#[derive(Debug, Serialize)]
-struct Token {
-    token: String,
-    user_id: i64,
-    expires: DateTime<Utc>,
-}
+use crate::model::Token;
 
 #[derive(Debug, Deserialize)]
-struct SignInDto {
+struct GrantDto {
     username: String,
     password: String,
 }
 
 #[derive(Debug)]
-enum SignInError {
+enum GrantError {
     DeletedUser,
     InvalidCredentials,
     NotFound,
@@ -32,7 +27,7 @@ enum SignInError {
     Hashing(argon2::password_hash::Error),
 }
 
-async fn sign_in(pool: &Pool<Postgres>, dto: SignInDto) -> Result<Token, SignInError> {
+async fn grant(pool: &Pool<Postgres>, dto: GrantDto) -> Result<Token, GrantError> {
     // Retrieve auth information.
     let auth = sqlx::query!(
         "
@@ -45,8 +40,8 @@ async fn sign_in(pool: &Pool<Postgres>, dto: SignInDto) -> Result<Token, SignInE
     .fetch_one(pool)
     .await
     .map_err(|err| match err {
-        sqlx::Error::RowNotFound => SignInError::NotFound,
-        _ => SignInError::Database(err),
+        sqlx::Error::RowNotFound => GrantError::NotFound,
+        _ => GrantError::Database(err),
     })?;
 
     if let Some(password) = auth.password {
@@ -54,9 +49,9 @@ async fn sign_in(pool: &Pool<Postgres>, dto: SignInDto) -> Result<Token, SignInE
         Argon2::default()
             .verify_password(
                 dto.password.as_bytes(),
-                &PasswordHash::new(&password).map_err(SignInError::Hashing)?,
+                &PasswordHash::new(&password).map_err(GrantError::Hashing)?,
             )
-            .map_err(|_| SignInError::InvalidCredentials)?;
+            .map_err(|_| GrantError::InvalidCredentials)?;
 
         // Generate token.
         let token = hex::encode(rand::thread_rng().gen::<[u8; 24]>());
@@ -66,7 +61,7 @@ async fn sign_in(pool: &Pool<Postgres>, dto: SignInDto) -> Result<Token, SignInE
         sqlx::query!(
             "
             INSERT INTO
-                UserTokens (token, user_id, expires)
+                Tokens (token, user_id, expires)
                 VALUES ($1, $2, $3)
             ",
             token,
@@ -75,7 +70,7 @@ async fn sign_in(pool: &Pool<Postgres>, dto: SignInDto) -> Result<Token, SignInE
         )
         .execute(pool)
         .await
-        .map_err(SignInError::Database)?;
+        .map_err(GrantError::Database)?;
 
         Ok(Token {
             token,
@@ -83,46 +78,71 @@ async fn sign_in(pool: &Pool<Postgres>, dto: SignInDto) -> Result<Token, SignInE
             expires,
         })
     } else {
-        Err(SignInError::DeletedUser)
+        Err(GrantError::DeletedUser)
     }
 }
 
 #[derive(Debug)]
-enum SignOutError {
+enum RevokeError {
     Database(sqlx::Error),
 }
 
-async fn sign_out(pool: &Pool<Postgres>, token: &str) -> Result<(), SignOutError> {
+async fn revoke(pool: &Pool<Postgres>, token: &str) -> Result<(), RevokeError> {
     sqlx::query!(
         "
-        DELETE FROM UserTokens
+        DELETE FROM Tokens
         WHERE token = $1
         ",
         token
     )
     .execute(pool)
     .await
-    .map_err(SignOutError::Database)?;
+    .map_err(RevokeError::Database)?;
 
     Ok(())
 }
 
-type SignInResult = Result<([(HeaderName, String); 1], Json<Token>), StatusCode>;
-type SignOutResult = Result<(), StatusCode>;
+#[derive(Debug)]
+enum RevokeAllError {
+    Database(sqlx::Error),
+}
+
+async fn revoke_all(pool: &Pool<Postgres>, token: &str) -> Result<(), RevokeAllError> {
+    sqlx::query!(
+        "
+        WITH user_id AS (
+            SELECT user_id
+            FROM Tokens
+            WHERE token = $1
+        )
+        DELETE FROM Tokens
+        WHERE user_id = user_id
+        ",
+        token
+    )
+    .execute(pool)
+    .await
+    .map_err(RevokeAllError::Database)?;
+
+    Ok(())
+}
+
+type GrantResult = Result<([(HeaderName, String); 1], Json<Token>), StatusCode>;
+type RevokeResult = Result<(), StatusCode>;
 
 pub fn controllers() -> Router {
     Router::new()
         .route(
-            "/sign-in",
+            "/grant",
             post(
                 async move |Extension(pool): Extension<Pool<Postgres>>,
-                            Json(dto): Json<SignInDto>|
-                            -> SignInResult {
-                    let token = sign_in(&pool, dto).await.map_err(|err| match err {
-                        SignInError::InvalidCredentials
-                        | SignInError::DeletedUser
-                        | SignInError::NotFound => StatusCode::FORBIDDEN,
-                        SignInError::Database(_) | SignInError::Hashing(_) => {
+                            Json(dto): Json<GrantDto>|
+                            -> GrantResult {
+                    let token = grant(&pool, dto).await.map_err(|err| match err {
+                        GrantError::InvalidCredentials
+                        | GrantError::DeletedUser
+                        | GrantError::NotFound => StatusCode::FORBIDDEN,
+                        GrantError::Database(_) | GrantError::Hashing(_) => {
                             tracing::error!("{:?}", err);
                             StatusCode::INTERNAL_SERVER_ERROR
                         }
@@ -133,17 +153,38 @@ pub fn controllers() -> Router {
             ),
         )
         .route(
-            "/sign-out",
+            "/revoke",
             post(
                 async move |Extension(pool): Extension<Pool<Postgres>>,
                             TypedHeader(Authorization(bearer)): TypedHeader<
                     Authorization<Bearer>,
                 >|
-                            -> SignOutResult {
-                    sign_out(&pool, &bearer.token())
+                            -> RevokeResult {
+                    revoke(&pool, &bearer.token())
                         .await
                         .map_err(|err| match err {
-                            SignOutError::Database(_) => {
+                            RevokeError::Database(_) => {
+                                tracing::error!("{:?}", err);
+                                StatusCode::INTERNAL_SERVER_ERROR
+                            }
+                        })?;
+
+                    Ok(())
+                },
+            ),
+        )
+        .route(
+            "/revoke-all",
+            post(
+                async move |Extension(pool): Extension<Pool<Postgres>>,
+                            TypedHeader(Authorization(bearer)): TypedHeader<
+                    Authorization<Bearer>,
+                >|
+                            -> RevokeResult {
+                    revoke_all(&pool, &bearer.token())
+                        .await
+                        .map_err(|err| match err {
+                            RevokeAllError::Database(_) => {
                                 tracing::error!("{:?}", err);
                                 StatusCode::INTERNAL_SERVER_ERROR
                             }

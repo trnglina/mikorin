@@ -33,7 +33,7 @@ async fn get_user_id(pool: &Pool<Postgres>, token: &str) -> Result<i64, sqlx::Er
     Ok(sqlx::query!(
         "
         SELECT user_id
-        FROM UserTokens
+        FROM Tokens
         WHERE token = $1 AND expires > now()
         ",
         token

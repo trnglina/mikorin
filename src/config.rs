@@ -1,0 +1,1 @@
+pub const PAGINATION_MAX_LIMIT: i64 = 1000;

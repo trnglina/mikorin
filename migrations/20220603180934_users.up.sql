@@ -14,14 +14,14 @@ VALUES ('groups.create'),
 -- Groups
 --
 CREATE TABLE Groups (
-    id INTEGER GENERATED ALWAYS AS IDENTITY,
+    id BIGINT GENERATED ALWAYS AS IDENTITY,
     name TEXT NOT NULL,
     PRIMARY KEY (id),
     UNIQUE (name)
 );
 
 CREATE TABLE GroupPermissions (
-    group_id INTEGER NOT NULL,
+    group_id BIGINT NOT NULL,
     permission_name TEXT NOT NULL,
     PRIMARY KEY (group_id, permission_name),
     FOREIGN KEY (group_id) REFERENCES Groups (id) ON DELETE CASCADE,
@@ -64,7 +64,10 @@ CREATE TABLE UserGroups (
     FOREIGN KEY (group_id) REFERENCES Groups (id) ON DELETE CASCADE
 );
 
-CREATE TABLE UserTokens (
+--
+-- Users
+--
+CREATE TABLE Tokens (
     token TEXT,
     user_id BIGINT NOT NULL,
     expires TIMESTAMPTZ NOT NULL,

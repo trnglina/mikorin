@@ -1,4 +1,5 @@
 #![feature(async_closure)]
+#![feature(let_chains)]
 
 use axum_server::tls_rustls::RustlsConfig;
 use dotenv::dotenv;
@@ -7,7 +8,9 @@ use std::net::SocketAddr;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 mod app;
+mod config;
 mod extract;
+mod model;
 mod result;
 mod serde;
 
