@@ -160,7 +160,7 @@ pub fn controllers() -> Router {
                     Authorization<Bearer>,
                 >|
                             -> RevokeResult {
-                    revoke(&pool, &bearer.token())
+                    revoke(&pool, bearer.token())
                         .await
                         .map_err(|err| match err {
                             RevokeError::Database(_) => {
@@ -181,7 +181,7 @@ pub fn controllers() -> Router {
                     Authorization<Bearer>,
                 >|
                             -> RevokeResult {
-                    revoke_all(&pool, &bearer.token())
+                    revoke_all(&pool, bearer.token())
                         .await
                         .map_err(|err| match err {
                             RevokeAllError::Database(_) => {
