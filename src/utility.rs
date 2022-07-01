@@ -3,6 +3,8 @@ use serde::{Deserialize, Deserializer};
 
 macro_rules! internal_error {
     ($err:expr) => {{
+        use axum::http::StatusCode;
+
         tracing::error!("{:?}", $err);
         StatusCode::INTERNAL_SERVER_ERROR
     }};
