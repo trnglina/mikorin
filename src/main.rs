@@ -1,4 +1,5 @@
 use axum::{Extension, Router};
+use axum_extra::routing::SpaRouter;
 use axum_server::tls_rustls::RustlsConfig;
 use dotenv::dotenv;
 use sqlx::postgres::PgPoolOptions;
@@ -43,7 +44,9 @@ async fn main() {
     tracing::debug!("listening on {}", addr);
 
     // Construct app.
+    let spa = SpaRouter::new("/assets", "dist");
     let app = Router::new()
+        .merge(spa)
         .nest(config::API_ROUTE, api::routes())
         .layer(Extension(pool));
 
