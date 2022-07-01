@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 argon2 = "0.4"
 axum = { version = "0.5", features = ["headers"] }
+axum-extra = { version = "0.3", features = ["cookie"] }
 axum-server = { version = "0.4.0", features = ["tls-rustls"] }
 chrono = { version = "0.4", features = ["serde"] }
 dotenv = "0.15"
@@ -22,6 +23,7 @@ sqlx = { version = "0.5", features = [
     "postgres",
     "runtime-tokio-rustls",
 ] }
+time = "0.3"
 tokio = { version = "1.0", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -1,18 +1,17 @@
-#![feature(async_closure)]
-#![feature(let_chains)]
-
+use axum::{Extension, Router};
 use axum_server::tls_rustls::RustlsConfig;
 use dotenv::dotenv;
 use sqlx::postgres::PgPoolOptions;
 use std::net::SocketAddr;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-mod app;
+#[macro_use]
+mod utility;
+
+mod api;
+mod auth;
 mod config;
-mod extract;
 mod model;
-mod result;
-mod serde;
 
 #[tokio::main]
 async fn main() {
@@ -43,9 +42,14 @@ async fn main() {
     let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
     tracing::debug!("listening on {}", addr);
 
+    // Construct app.
+    let app = Router::new()
+        .nest(config::API_ROUTE, api::routes())
+        .layer(Extension(pool));
+
     // Start app.
     axum_server::bind_rustls(addr, config)
-        .serve(app::app(pool).await.into_make_service())
+        .serve(app.into_make_service())
         .await
         .unwrap();
 }
