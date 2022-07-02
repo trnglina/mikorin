@@ -11,7 +11,7 @@ use axum_extra::extract::CookieJar;
 use headers::{authorization::Basic, Authorization};
 use sqlx::{Pool, Postgres};
 
-use crate::config;
+use crate::{config, entities::Permission};
 
 async fn extract_session_id<B>(req: &mut RequestParts<B>) -> Option<String>
 where
@@ -78,7 +78,7 @@ where
 pub struct Authorized {
     pub user_id: i64,
     pub session_id: String,
-    pub permissions: HashSet<String>,
+    pub permissions: HashSet<Permission>,
 }
 
 #[async_trait]
@@ -97,7 +97,7 @@ where
 
         let record = sqlx::query!(
             r#"
-            SELECT Sessions.user_id, Groups_.permissions as "permissions: Vec<String>"
+            SELECT Sessions.user_id, Groups_.permissions as "permissions: Vec<Permission>"
             FROM Sessions JOIN Users ON Sessions.user_id = Users.id
                           JOIN Groups_ ON Users.group_id = Groups_.id
             WHERE Sessions.id = $1 AND Sessions.expires > NOW()

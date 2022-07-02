@@ -15,7 +15,7 @@ use sqlx::{Pool, Postgres, QueryBuilder, Row};
 
 use crate::{
     config,
-    entities::User,
+    entities::{Permission, User},
     extract::{Authenticated, Authorized, Maybe, Priveledged},
     utility::{action, deserialize_some, ApiResult},
 };
@@ -111,7 +111,7 @@ async fn create_user(
     Json(body): Json<CreateUserBody>,
 ) -> ApiResult<action::Create<User>> {
     if !USERNAME_REGEX.is_match(&body.username) || !PASSWORD_REGEX.is_match(&body.password) {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     let salt = SaltString::generate(&mut rand_core::OsRng);
@@ -180,7 +180,6 @@ async fn patch_user(
     Maybe(priveledged): Maybe<Priveledged>,
     authorized: Authorized,
 ) -> ApiResult<action::Patch> {
-    // If no fields are updated, return immediately.
     if body.username.is_none()
         && body.password.is_none()
         && body.name.is_none()
@@ -201,7 +200,7 @@ async fn patch_user(
             }
 
             if !USERNAME_REGEX.is_match(username) {
-                return Err(StatusCode::BAD_REQUEST);
+                return Err(StatusCode::UNPROCESSABLE_ENTITY);
             }
 
             Some(username)
@@ -221,7 +220,7 @@ async fn patch_user(
             }
 
             if !PASSWORD_REGEX.is_match(password) {
-                return Err(StatusCode::BAD_REQUEST);
+                return Err(StatusCode::UNPROCESSABLE_ENTITY);
             }
 
             let salt = SaltString::generate(&mut rand_core::OsRng);
@@ -235,8 +234,8 @@ async fn patch_user(
         None => None,
     };
 
-    let name = require_user!(authorized, body.name, user_id);
-    let group_id = require_permission!(authorized, body.group_id, "users.groups.edit");
+    let name = require_user!(authorized, user_id, body.name);
+    let group_id = require_permission!(authorized, Permission::Users_GroupId_Edit, body.group_id);
 
     // Construct query.
     let mut q = QueryBuilder::<Postgres>::new("UPDATE Users SET ");

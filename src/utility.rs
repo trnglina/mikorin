@@ -11,7 +11,15 @@ macro_rules! internal_error {
 }
 
 macro_rules! require_user {
-    ($auth:expr, $field:expr, $user_id:expr) => {{
+    ($auth:expr, $user_id:expr) => {{
+        use axum::http::StatusCode;
+
+        if $user_id != $auth.user_id {
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }};
+
+    ($auth:expr, $user_id:expr, $field:expr) => {{
         use axum::http::StatusCode;
 
         match $field {
@@ -28,12 +36,19 @@ macro_rules! require_user {
 }
 
 macro_rules! require_permission {
-    ($auth:expr, $field:expr, $perm:expr) => {{
+    ($auth:expr, $perm:expr) => {{
+        use axum::http::StatusCode;
+        if !$auth.permissions.contains(&$perm) {
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }};
+
+    ($auth:expr, $perm:expr, $field:expr) => {{
         use axum::http::StatusCode;
 
         match $field {
             Some(ref field) => {
-                if !$auth.permissions.contains($perm) {
+                if !$auth.permissions.contains(&$perm) {
                     return Err(StatusCode::FORBIDDEN);
                 }
 

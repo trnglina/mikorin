@@ -9,9 +9,8 @@ CREATE EXTENSION pg_trgm;
 CREATE TYPE Permission AS ENUM (
     'groups.create',
     'groups.delete',
-    'groups.name.edit',
-    'groups.permissions.edit',
-    'users.groups.edit'
+    'groups.edit',
+    'users.group_id.edit'
 );
 
 --
