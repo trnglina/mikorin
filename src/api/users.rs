@@ -1,6 +1,6 @@
 use argon2::{
     password_hash::{rand_core, SaltString},
-    Argon2, PasswordHasher,
+    Argon2, PasswordHash, PasswordHasher, PasswordVerifier,
 };
 use axum::{
     extract::{OriginalUri, Path, Query},
@@ -217,8 +217,54 @@ async fn show_user(
     }))
 }
 
+async fn validate_current_password(
+    pool: &Pool<Postgres>,
+    id: i64,
+    current_password: String,
+) -> Result<(), StatusCode> {
+    let digest = sqlx::query_scalar!(
+        r#"
+        SELECT digest as "digest!: String"
+        FROM Users
+        WHERE id = $1 AND digest IS NOT NULL
+        "#,
+        id
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|err| match err {
+        sqlx::Error::RowNotFound => StatusCode::FORBIDDEN,
+        _ => internal_error!(err),
+    })?;
+
+    Argon2::default()
+        .verify_password(
+            current_password.as_bytes(),
+            &PasswordHash::new(&digest).map_err(|err| internal_error!(err))?,
+        )
+        .map_err(|_| StatusCode::FORBIDDEN)?;
+
+    Ok(())
+}
+
+async fn clear_sessions(pool: &Pool<Postgres>, id: i64) -> Result<(), sqlx::Error> {
+    sqlx::query!(
+        r#"
+        DELETE FROM Sessions
+        WHERE user_id = $1
+        "#,
+        id
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 struct PatchUserBody {
+    _current_password: Option<String>,
+
     username: Option<String>,
     password: Option<String>,
     #[serde(default, deserialize_with = "deserialize_some")]
@@ -235,8 +281,19 @@ async fn patch_user(
         return Err(StatusCode::FORBIDDEN);
     }
 
+    // If no fields are updated, return immediately.
     if body.username.is_none() && body.password.is_none() && body.name.is_none() {
         return Ok(action::Patch);
+    }
+
+    // Changes to username and password must also include _current_password
+    if body.username.is_some() || body.password.is_some() {
+        if let Some(current_password) = body._current_password {
+            // Check current password.
+            validate_current_password(&pool, id, current_password).await?;
+        } else {
+            return Err(StatusCode::FORBIDDEN);
+        }
     }
 
     // Validate username if set.
@@ -287,16 +344,9 @@ async fn patch_user(
 
     // If username or password changed, also invalidate all sessions.
     if body.username.is_some() || body.password.is_some() {
-        sqlx::query!(
-            r#"
-                DELETE FROM Sessions
-                WHERE user_id = $1
-                "#,
-            id
-        )
-        .execute(&pool)
-        .await
-        .map_err(|err| internal_error!(err))?;
+        clear_sessions(&pool, id)
+            .await
+            .map_err(|err| internal_error!(err))?;
     }
 
     Ok(action::Patch)
@@ -327,16 +377,9 @@ async fn delete_user(
     .map_err(|err| internal_error!(err))?;
 
     // Invalidate all sessions.
-    sqlx::query!(
-        r#"
-        DELETE FROM Sessions
-        WHERE user_id = $1
-        "#,
-        id
-    )
-    .execute(&pool)
-    .await
-    .map_err(|err| internal_error!(err))?;
+    clear_sessions(&pool, id)
+        .await
+        .map_err(|err| internal_error!(err))?;
 
     Ok(action::Delete)
 }
