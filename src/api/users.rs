@@ -245,28 +245,8 @@ async fn patch_user(
         None => None,
     };
 
-    let name = match body.name {
-        Some(ref name) => {
-            // Only the current user can change the name.
-            if user_id != authorized.user_id {
-                return Err(StatusCode::FORBIDDEN);
-            }
-
-            Some(name)
-        }
-        None => None,
-    };
-
-    let group_id = match body.group_id {
-        Some(ref group_id) => {
-            // Changes to group_id require users.groups.edit permission.
-            if !authorized.permissions.contains("users.groups.edit") {
-                return Err(StatusCode::FORBIDDEN);
-            }
-            Some(group_id)
-        }
-        None => None,
-    };
+    let name = require_user!(authorized, body.name, user_id);
+    let group_id = require_permission!(authorized, body.group_id, "users.groups.edit");
 
     // Construct query.
     let mut q = QueryBuilder::<Postgres>::new("UPDATE Users SET ");

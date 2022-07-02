@@ -10,6 +10,40 @@ macro_rules! internal_error {
     }};
 }
 
+macro_rules! require_user {
+    ($auth:expr, $field:expr, $user_id:expr) => {{
+        use axum::http::StatusCode;
+
+        match $field {
+            Some(ref field) => {
+                if $user_id != $auth.user_id {
+                    return Err(StatusCode::FORBIDDEN);
+                }
+
+                Some(field)
+            }
+            None => None,
+        }
+    }};
+}
+
+macro_rules! require_permission {
+    ($auth:expr, $field:expr, $perm:expr) => {{
+        use axum::http::StatusCode;
+
+        match $field {
+            Some(ref field) => {
+                if !$auth.permissions.contains($perm) {
+                    return Err(StatusCode::FORBIDDEN);
+                }
+
+                Some(field)
+            }
+            None => None,
+        }
+    }};
+}
+
 // https://github.com/serde-rs/serde/issues/984#issuecomment-314143738
 pub fn deserialize_some<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
 where
