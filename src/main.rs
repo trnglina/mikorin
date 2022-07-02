@@ -44,7 +44,7 @@ async fn main() {
     tracing::debug!("listening on {}", addr);
 
     // Construct app.
-    let spa = SpaRouter::new("/assets", "dist");
+    let spa = SpaRouter::new("/assets", "client/dist");
     let app = Router::new()
         .merge(spa)
         .nest(config::API_ROUTE, api::routes())
