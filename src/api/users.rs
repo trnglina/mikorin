@@ -20,11 +20,6 @@ use crate::{
     utility::{action, deserialize_some, ApiResult},
 };
 
-struct PartialUser {
-    pub id: i64,
-    pub name: Option<String>,
-}
-
 lazy_static! {
     static ref USERNAME_REGEX: Regex = Regex::new("^[a-zA-Z0-9_\\-]{4,64}$").unwrap();
     static ref PASSWORD_REGEX: Regex = Regex::new("^.{8,512}$").unwrap();
@@ -52,6 +47,11 @@ async fn list_users(
     let limit = 0.max(
         config::PAGINATION_MAX_LIMIT.min(query.limit.unwrap_or(config::PAGINATION_DEFAULT_LIMIT)),
     );
+
+    struct PartialUser {
+        pub id: i64,
+        pub name: Option<String>,
+    }
 
     let partial_users = if let Some(name) = query.name {
         let threshold = 0.0_f32.max(
@@ -145,8 +145,7 @@ async fn create_user(
         .hash_password(body.password.as_bytes(), &salt)
         .map_err(|err| internal_error!(err))?;
 
-    let partial_user = sqlx::query_as!(
-        PartialUser,
+    let partial_user = sqlx::query!(
         r#"
         INSERT INTO Users (username, digest, name)
                     VALUES ($1, $2, $3)
@@ -178,8 +177,7 @@ async fn show_user(
     Extension(pool): Extension<Pool<Postgres>>,
     Path(id): Path<i64>,
 ) -> ApiResult<action::Show<User>> {
-    let partial_user = sqlx::query_as!(
-        PartialUser,
+    let partial_user = sqlx::query!(
         r#"
         SELECT id, name
         FROM Users
