@@ -17,7 +17,7 @@ where
     CookieJar::from_request(req)
         .await
         .unwrap()
-        .get(config::COOKIE_SESSION_KEY)
+        .get(config::COOKIE_SESSION_ID)
         .map(|x| x.value().to_string())
 }
 

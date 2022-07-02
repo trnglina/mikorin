@@ -74,7 +74,7 @@ async fn sign_in(
     .map_err(|err| internal_error!(err))?;
 
     // Construct cookie.
-    let mut cookie = Cookie::new(config::COOKIE_SESSION_KEY, session_id);
+    let mut cookie = Cookie::new(config::COOKIE_SESSION_ID, session_id);
     cookie.set_secure(true);
     cookie.set_http_only(true);
     cookie.set_max_age(time::Duration::days(24));
@@ -88,7 +88,7 @@ async fn sign_out(
     jar: CookieJar,
 ) -> (CookieJar, StatusCode) {
     if let Some(session_id) = jar
-        .get(config::COOKIE_SESSION_KEY)
+        .get(config::COOKIE_SESSION_ID)
         .map(|x| x.value().to_string())
     {
         // Remove session from database.
@@ -105,7 +105,7 @@ async fn sign_out(
     }
 
     (
-        jar.remove(Cookie::named(config::COOKIE_SESSION_KEY)),
+        jar.remove(Cookie::named(config::COOKIE_SESSION_ID)),
         StatusCode::NO_CONTENT,
     )
 }
