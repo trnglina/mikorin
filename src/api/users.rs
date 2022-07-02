@@ -191,17 +191,12 @@ async fn patch_user(
 
     let username = match body.username {
         Some(ref username) => {
-            // Only the current user can change the username.
-            if user_id != authorized.user_id {
-                return Err(StatusCode::FORBIDDEN);
-            }
-
-            // Changes to the username must also include current credentials.
-            if let Some(ref priveledged) = priveledged {
-                if user_id != priveledged.user_id {
-                    return Err(StatusCode::FORBIDDEN);
-                }
-            } else {
+            if !user_id == authorized.user_id
+                || !priveledged
+                    .as_ref()
+                    .map(|p| user_id == p.user_id)
+                    .unwrap_or(false)
+            {
                 return Err(StatusCode::FORBIDDEN);
             }
 
@@ -216,17 +211,12 @@ async fn patch_user(
 
     let digest = match body.password {
         Some(ref password) => {
-            // Only the current user can change the password.
-            if user_id != authorized.user_id {
-                return Err(StatusCode::FORBIDDEN);
-            }
-
-            // Changes to the username must also include current credentials.
-            if let Some(ref priveledged) = priveledged {
-                if user_id != priveledged.user_id {
-                    return Err(StatusCode::FORBIDDEN);
-                }
-            } else {
+            if !user_id == authorized.user_id
+                || !priveledged
+                    .as_ref()
+                    .map(|p| user_id == p.user_id)
+                    .unwrap_or(false)
+            {
                 return Err(StatusCode::FORBIDDEN);
             }
 
