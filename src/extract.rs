@@ -97,9 +97,9 @@ where
 
         let record = sqlx::query!(
             r#"
-            SELECT Sessions.user_id, UserGroups.permissions as "permissions: Vec<String>"
+            SELECT Sessions.user_id, Groups_.permissions as "permissions: Vec<String>"
             FROM Sessions JOIN Users ON Sessions.user_id = Users.id
-                          JOIN UserGroups ON Users.group_id = UserGroups.id
+                          JOIN Groups_ ON Users.group_id = Groups_.id
             WHERE Sessions.id = $1 AND Sessions.expires > NOW()
             "#,
             session_id

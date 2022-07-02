@@ -15,9 +15,9 @@ CREATE TYPE Permission AS ENUM (
 );
 
 --
--- UserGroups
+-- Groups
 --
-CREATE TABLE UserGroups (
+CREATE TABLE Groups_ (
     id bigint GENERATED ALWAYS AS IDENTITY,
     name text NOT NULL,
     permissions Permission[] NOT NULL,
@@ -25,10 +25,10 @@ CREATE TABLE UserGroups (
     UNIQUE (name)
 );
 
-INSERT INTO UserGroups (name, permissions)
+INSERT INTO Groups_ (name, permissions)
     VALUES ('User', ARRAY[]::Permission[]);
 
-INSERT INTO UserGroups (name, permissions)
+INSERT INTO Groups_ (name, permissions)
     VALUES ('Admin', ENUM_RANGE(NULL::Permission));
 
 --
@@ -41,7 +41,7 @@ CREATE TABLE Users (
     name text,
     group_id bigint NOT NULL DEFAULT 1::bigint,
     PRIMARY KEY (id),
-    FOREIGN KEY (group_id) REFERENCES UserGroups (id) ON DELETE SET DEFAULT
+    FOREIGN KEY (group_id) REFERENCES Groups_ (id) ON DELETE SET DEFAULT
 );
 
 CREATE UNIQUE INDEX ON Users (LOWER(username));
