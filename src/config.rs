@@ -3,7 +3,7 @@ pub const API_ROUTE: &str = "/api";
 
 pub const COOKIE_SESSION_KEY: &str = "_session_id";
 
-pub const SIMILARITY_DEFAULT_THRESHOLD: f32 = 0.5;
+pub const FUZZY_SIMILARITY_THRESHOLD: f32 = 0.4;
 
 pub const PAGINATION_DEFAULT_LIMIT: i64 = 50;
 pub const PAGINATION_MAX_LIMIT: i64 = 100;

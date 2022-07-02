@@ -79,6 +79,13 @@ pub mod action {
         }
     }
 
+    pub struct Put;
+    impl IntoResponse for Put {
+        fn into_response(self) -> axum::response::Response {
+            StatusCode::NO_CONTENT.into_response()
+        }
+    }
+
     pub struct Delete;
     impl IntoResponse for Delete {
         fn into_response(self) -> axum::response::Response {

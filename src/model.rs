@@ -11,5 +11,4 @@ pub struct Group {
 pub struct User {
     pub id: i64,
     pub name: Option<String>,
-    pub groups: Vec<Group>,
 }
