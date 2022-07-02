@@ -11,4 +11,5 @@ pub struct Group {
 pub struct User {
     pub id: i64,
     pub name: Option<String>,
+    pub group_id: i64,
 }

@@ -15,47 +15,45 @@ CREATE TYPE Permission AS ENUM (
 );
 
 --
--- Groups
+-- UserGroups
 --
-CREATE TABLE Groups (
-    id BIGINT GENERATED ALWAYS AS IDENTITY,
-    name TEXT NOT NULL,
-    permissions Permission ARRAY NOT NULL,
+CREATE TABLE UserGroups (
+    id bigint GENERATED ALWAYS AS IDENTITY,
+    name text NOT NULL,
+    permissions Permission[] NOT NULL,
     PRIMARY KEY (id),
     UNIQUE (name)
 );
 
-INSERT INTO Groups (name, permissions)
-VALUES ('Admin', ENUM_RANGE(null::Permission));
+INSERT INTO UserGroups (name, permissions)
+    VALUES ('User', ARRAY[]::Permission[]);
+
+INSERT INTO UserGroups (name, permissions)
+    VALUES ('Admin', ENUM_RANGE(NULL::Permission));
 
 --
 -- Users
 --
 CREATE TABLE Users (
-    id BIGINT GENERATED ALWAYS AS IDENTITY,
-    username TEXT,
-    digest TEXT,
-    name TEXT,
-    PRIMARY KEY (id)
+    id bigint GENERATED ALWAYS AS IDENTITY,
+    username text,
+    digest text,
+    name text,
+    group_id bigint NOT NULL DEFAULT 1::bigint,
+    PRIMARY KEY (id),
+    FOREIGN KEY (group_id) REFERENCES UserGroups (id) ON DELETE SET DEFAULT
 );
 
 CREATE UNIQUE INDEX ON Users (LOWER(username));
-
-CREATE TABLE UserGroups (
-    user_id BIGINT NOT NULL,
-    group_id BIGINT NOT NULL,
-    PRIMARY KEY (user_id, group_id),
-    FOREIGN KEY (user_id) REFERENCES Users (id) ON DELETE CASCADE,
-    FOREIGN KEY (group_id) REFERENCES Groups (id) ON DELETE CASCADE
-);
 
 --
 -- Sessions
 --
 CREATE TABLE Sessions (
-    id TEXT,
-    user_id BIGINT NOT NULL,
-    expires TIMESTAMPTZ NOT NULL,
+    id text,
+    user_id bigint NOT NULL,
+    expires timestamptz NOT NULL,
     PRIMARY KEY (id),
     FOREIGN KEY (user_id) REFERENCES Users (id) ON DELETE CASCADE
 );
+

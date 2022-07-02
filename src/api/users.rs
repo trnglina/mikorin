@@ -1,11 +1,11 @@
 use argon2::{
     password_hash::{rand_core, SaltString},
-    Argon2, PasswordHash, PasswordHasher, PasswordVerifier,
+    Argon2, PasswordHasher,
 };
 use axum::{
     extract::{OriginalUri, Path, Query},
     http::StatusCode,
-    routing::{get, put},
+    routing::get,
     Extension, Json, Router,
 };
 use lazy_static::lazy_static;
@@ -14,9 +14,9 @@ use serde::Deserialize;
 use sqlx::{Pool, Postgres, QueryBuilder, Row};
 
 use crate::{
-    auth::{Authenticated, Authorized},
     config,
-    model::{Group, User},
+    entities::User,
+    extract::{Authenticated, Authorized, Maybe, Priveledged},
     utility::{action, deserialize_some, ApiResult},
 };
 
@@ -31,11 +31,6 @@ pub fn controllers() -> Router {
         .route(
             "/:user_id",
             get(show_user).patch(patch_user).delete(delete_user),
-        )
-        .route("/:user_id/groups", get(list_user_groups))
-        .route(
-            "/:user_id/groups/:group_id",
-            put(put_user_groups).delete(delete_user_groups),
         )
 }
 
@@ -57,8 +52,9 @@ async fn clear_sessions(pool: &Pool<Postgres>, id: i64) -> Result<(), sqlx::Erro
 struct ListUsersQuery {
     offset: Option<i64>,
     limit: Option<i64>,
-    name: Option<String>,
     fuzzy: Option<String>,
+    name: Option<String>,
+    group_id: Option<i64>,
 }
 
 async fn list_users(
@@ -71,7 +67,7 @@ async fn list_users(
     );
 
     // Construct query.
-    let mut q = QueryBuilder::<Postgres>::new("SELECT id, name FROM Users ");
+    let mut q = QueryBuilder::<Postgres>::new("SELECT id, name, group_id FROM Users ");
     if let Some(name) = query.name {
         if query.fuzzy.is_some() {
             q.push("WHERE SIMILARITY (name, ");
@@ -83,6 +79,10 @@ async fn list_users(
             q.push(" || '%'");
         }
     }
+    if let Some(group_id) = query.group_id {
+        q.push("WHERE group_id = ");
+        q.push_bind(group_id);
+    }
     q.push(format!("ORDER BY id OFFSET {} LIMIT {}", offset, limit));
 
     Ok(action::List(
@@ -90,6 +90,7 @@ async fn list_users(
             .map(|row| User {
                 id: row.try_get("id").unwrap(),
                 name: row.try_get("name").unwrap(),
+                group_id: row.try_get("group_id").unwrap(),
             })
             .fetch_all(&pool)
             .await
@@ -123,7 +124,7 @@ async fn create_user(
         r#"
         INSERT INTO Users (username, digest, name)
                     VALUES ($1, $2, $3)
-        RETURNING id, name
+        RETURNING id, name, group_id
         "#,
         body.username,
         hash.to_string(),
@@ -148,7 +149,7 @@ async fn show_user(
         sqlx::query_as!(
             User,
             r#"
-            SELECT id, name
+            SELECT id, name, group_id
             FROM Users
             WHERE id = $1
             "#,
@@ -165,91 +166,125 @@ async fn show_user(
 
 #[derive(Debug, Deserialize)]
 struct PatchUserBody {
-    _current_password: Option<String>,
-
     username: Option<String>,
     password: Option<String>,
     #[serde(default, deserialize_with = "deserialize_some")]
     name: Option<Option<String>>,
+    group_id: Option<i64>,
 }
 
 async fn patch_user(
     Extension(pool): Extension<Pool<Postgres>>,
     Path(user_id): Path<i64>,
     Json(body): Json<PatchUserBody>,
-    Authenticated(auth_id): Authenticated,
+    Maybe(priveledged): Maybe<Priveledged>,
+    authorized: Authorized,
 ) -> ApiResult<action::Patch> {
-    if auth_id != user_id {
-        return Err(StatusCode::FORBIDDEN);
-    }
-
     // If no fields are updated, return immediately.
-    if body.username.is_none() && body.password.is_none() && body.name.is_none() {
+    if body.username.is_none()
+        && body.password.is_none()
+        && body.name.is_none()
+        && body.group_id.is_none()
+    {
         return Ok(action::Patch);
     }
 
-    // Changes to username and password must also include _current_password
-    if body.username.is_some() || body.password.is_some() {
-        if let Some(current_password) = body._current_password {
-            // Check current password.
-            let digest = sqlx::query_scalar!(
-                r#"
-                SELECT digest as "digest!: String"
-                FROM Users
-                WHERE id = $1 AND digest IS NOT NULL
-                "#,
-                user_id
-            )
-            .fetch_one(&pool)
-            .await
-            .map_err(|err| match err {
-                sqlx::Error::RowNotFound => StatusCode::FORBIDDEN,
-                _ => internal_error!(err),
-            })?;
+    let username = match body.username {
+        Some(ref username) => {
+            // Only the current user can change the username.
+            if user_id != authorized.user_id {
+                return Err(StatusCode::FORBIDDEN);
+            }
 
-            Argon2::default()
-                .verify_password(
-                    current_password.as_bytes(),
-                    &PasswordHash::new(&digest).map_err(|err| internal_error!(err))?,
-                )
-                .map_err(|_| StatusCode::FORBIDDEN)?;
-        } else {
-            return Err(StatusCode::FORBIDDEN);
+            // Changes to the username must also include current credentials.
+            if let Some(ref priveledged) = priveledged {
+                if user_id != priveledged.user_id {
+                    return Err(StatusCode::FORBIDDEN);
+                }
+            } else {
+                return Err(StatusCode::FORBIDDEN);
+            }
+
+            if !USERNAME_REGEX.is_match(username) {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+
+            Some(username)
         }
-    }
-
-    // Validate username if set.
-    let username = match &body.username {
-        Some(uname) if USERNAME_REGEX.is_match(uname) => Some(uname),
-        Some(_) => return Err(StatusCode::BAD_REQUEST),
         None => None,
     };
 
-    // Validate password and hash if set.
-    let salt = SaltString::generate(&mut rand_core::OsRng);
-    let hash = match &body.password {
-        Some(pword) if PASSWORD_REGEX.is_match(pword) => Some(
-            Argon2::default()
-                .hash_password(pword.as_bytes(), &salt)
-                .map_err(|err| internal_error!(err))?,
-        ),
-        Some(_) => return Err(StatusCode::BAD_REQUEST),
+    let digest = match body.password {
+        Some(ref password) => {
+            // Only the current user can change the password.
+            if user_id != authorized.user_id {
+                return Err(StatusCode::FORBIDDEN);
+            }
+
+            // Changes to the username must also include current credentials.
+            if let Some(ref priveledged) = priveledged {
+                if user_id != priveledged.user_id {
+                    return Err(StatusCode::FORBIDDEN);
+                }
+            } else {
+                return Err(StatusCode::FORBIDDEN);
+            }
+
+            if !PASSWORD_REGEX.is_match(password) {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+
+            let salt = SaltString::generate(&mut rand_core::OsRng);
+            Some(
+                Argon2::default()
+                    .hash_password(password.as_bytes(), &salt)
+                    .map_err(|err| internal_error!(err))?
+                    .to_string(),
+            )
+        }
+        None => None,
+    };
+
+    let name = match body.name {
+        Some(ref name) => {
+            // Only the current user can change the name.
+            if user_id != authorized.user_id {
+                return Err(StatusCode::FORBIDDEN);
+            }
+
+            Some(name)
+        }
+        None => None,
+    };
+
+    let group_id = match body.group_id {
+        Some(ref group_id) => {
+            // Changes to group_id require users.groups.edit permission.
+            if !authorized.permissions.contains("users.groups.edit") {
+                return Err(StatusCode::FORBIDDEN);
+            }
+            Some(group_id)
+        }
         None => None,
     };
 
     // Construct query.
     let mut q = QueryBuilder::<Postgres>::new("UPDATE Users SET ");
-    if let Some(uname) = username {
+    if let Some(ref uname) = username {
         q.push("username = ");
         q.push_bind(uname);
     }
-    if let Some(hash) = hash {
+    if let Some(ref digest) = digest {
         q.push("digest = ");
-        q.push_bind(hash.to_string());
+        q.push_bind(digest);
     }
-    if let Some(name) = body.name {
+    if let Some(ref name) = name {
         q.push("name = ");
         q.push_bind(name);
+    }
+    if let Some(ref group_id) = group_id {
+        q.push("group_id = ");
+        q.push_bind(group_id);
     }
     q.push("WHERE id = ");
     q.push_bind(user_id);
@@ -261,7 +296,7 @@ async fn patch_user(
     })?;
 
     // If username or password changed, also invalidate all sessions.
-    if body.username.is_some() || body.password.is_some() {
+    if username.is_some() || digest.is_some() {
         clear_sessions(&pool, user_id)
             .await
             .map_err(|err| internal_error!(err))?;
@@ -273,9 +308,10 @@ async fn patch_user(
 async fn delete_user(
     Extension(pool): Extension<Pool<Postgres>>,
     Path(user_id): Path<i64>,
-    Authenticated(auth_id): Authenticated,
+    priveledged: Priveledged,
+    authenticated: Authenticated,
 ) -> ApiResult<action::Delete> {
-    if auth_id != user_id {
+    if user_id != priveledged.user_id || user_id != authenticated.user_id {
         return Err(StatusCode::FORBIDDEN);
     }
 
@@ -298,82 +334,6 @@ async fn delete_user(
     clear_sessions(&pool, user_id)
         .await
         .map_err(|err| internal_error!(err))?;
-
-    Ok(action::Delete)
-}
-
-async fn list_user_groups(
-    Extension(pool): Extension<Pool<Postgres>>,
-    Path(user_id): Path<i64>,
-) -> ApiResult<action::List<Group>> {
-    Ok(action::List(
-        sqlx::query_as!(
-            Group,
-            r#"
-            SELECT Groups.id, Groups.name, Groups.permissions as "permissions!: Vec<String>"
-            FROM UserGroups JOIN Groups ON UserGroups.group_id = Groups.id
-            WHERE UserGroups.user_id = $1
-            "#,
-            user_id
-        )
-        .fetch_all(&pool)
-        .await
-        .map_err(|err| internal_error!(err))?,
-    ))
-}
-
-async fn put_user_groups(
-    Extension(pool): Extension<Pool<Postgres>>,
-    Path((user_id, group_id)): Path<(i64, i64)>,
-    Authorized(_, permissions): Authorized,
-) -> ApiResult<action::Put> {
-    if !permissions.contains("users.groups.edit") {
-        return Err(StatusCode::FORBIDDEN);
-    }
-
-    sqlx::query!(
-        r#"
-        INSERT INTO UserGroups (user_id, group_id)
-                    VALUES ($1, $2)
-        "#,
-        user_id,
-        group_id,
-    )
-    .execute(&pool)
-    .await
-    .map_err(|err| match err {
-        sqlx::Error::Database(db) if "23505" == db.code().unwrap() => StatusCode::OK,
-        sqlx::Error::Database(db) if "23503" == db.code().unwrap() => StatusCode::BAD_REQUEST,
-        _ => internal_error!(err),
-    })?;
-
-    Ok(action::Put)
-}
-
-async fn delete_user_groups(
-    Extension(pool): Extension<Pool<Postgres>>,
-    Path((user_id, group_id)): Path<(i64, i64)>,
-    Authorized(_, permissions): Authorized,
-) -> ApiResult<action::Delete> {
-    if !permissions.contains("users.groups.edit") {
-        return Err(StatusCode::FORBIDDEN);
-    }
-
-    sqlx::query!(
-        r#"
-        DELETE FROM UserGroups
-        WHERE user_id = $1 AND group_id = $2
-        "#,
-        user_id,
-        group_id,
-    )
-    .execute(&pool)
-    .await
-    .map_err(|err| match err {
-        sqlx::Error::Database(db) if "23505" == db.code().unwrap() => StatusCode::OK,
-        sqlx::Error::Database(db) if "23503" == db.code().unwrap() => StatusCode::BAD_REQUEST,
-        _ => internal_error!(err),
-    })?;
 
     Ok(action::Delete)
 }

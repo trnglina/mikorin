@@ -1,17 +1,10 @@
-use argon2::{Argon2, PasswordHash, PasswordVerifier};
-use axum::{http::StatusCode, routing::post, Extension, Json, Router};
+use axum::{http::StatusCode, response::Redirect, routing::post, Extension, Router};
 use axum_extra::extract::{cookie::Cookie, CookieJar};
 use chrono::{Duration, Utc};
 use rand::Rng;
-use serde::Deserialize;
 use sqlx::{Pool, Postgres};
 
-use crate::config;
-
-struct AuthUser {
-    pub id: i64,
-    pub digest: String,
-}
+use crate::{config, extract::Priveledged};
 
 pub fn controllers() -> Router {
     Router::new()
@@ -19,42 +12,11 @@ pub fn controllers() -> Router {
         .route("/sign-out", post(sign_out))
 }
 
-#[derive(Debug, Deserialize)]
-struct SignInBody {
-    username: String,
-    password: String,
-}
-
 async fn sign_in(
     Extension(pool): Extension<Pool<Postgres>>,
-    Json(body): Json<SignInBody>,
+    priveledged: Priveledged,
     jar: CookieJar,
-) -> Result<(CookieJar, StatusCode), StatusCode> {
-    // Retrieve auth information.
-    let auth_user = sqlx::query_as!(
-        AuthUser,
-        r#"
-        SELECT id, digest as "digest!: String"
-        FROM Users
-        WHERE username = $1 AND digest IS NOT NULL
-        "#,
-        body.username
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(|err| match err {
-        sqlx::Error::RowNotFound => StatusCode::FORBIDDEN,
-        _ => internal_error!(err),
-    })?;
-
-    // Verify password.
-    Argon2::default()
-        .verify_password(
-            body.password.as_bytes(),
-            &PasswordHash::new(&auth_user.digest).map_err(|err| internal_error!(err))?,
-        )
-        .map_err(|_| StatusCode::FORBIDDEN)?;
-
+) -> Result<(CookieJar, Redirect), StatusCode> {
     // Generate session.
     let session_id = hex::encode(rand::thread_rng().gen::<[u8; 24]>());
     let expires = Utc::now() + Duration::days(24);
@@ -66,7 +28,7 @@ async fn sign_in(
                     VALUES ($1, $2, $3)
         "#,
         session_id,
-        auth_user.id,
+        priveledged.user_id,
         expires
     )
     .execute(&pool)
@@ -80,7 +42,14 @@ async fn sign_in(
     cookie.set_max_age(time::Duration::days(24));
     cookie.set_path(config::API_ROUTE);
 
-    Ok((jar.add(cookie), StatusCode::NO_CONTENT))
+    Ok((
+        jar.add(cookie),
+        Redirect::to(&format!(
+            "{}/users/{}",
+            config::API_ROUTE,
+            priveledged.user_id
+        )),
+    ))
 }
 
 async fn sign_out(
